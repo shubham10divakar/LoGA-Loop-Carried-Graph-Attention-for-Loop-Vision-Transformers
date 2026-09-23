@@ -1,0 +1,27 @@
+pip install -r requirements.txt
+python -m pytest tests -q
+
+# ---- model summary ----
+python train.py --config config.yaml --summary-only --num-classes 38
+
+# ---- LCGA (new variant) on each dataset ----
+python train.py --config config.yaml --dataset plantodc
+python train.py --config config.yaml --dataset plantvillage
+python train.py --config config.yaml --dataset cub200
+python train.py --config config.yaml --dataset flowers102
+python train.py --config config.yaml --dataset aircraft
+python train.py --config config.yaml --dataset food101 --save-every-steps 500
+
+# ---- main comparison ----
+python train.py --config config.yaml --dataset plantodc --variant loopvit
+python train.py --config config.yaml --dataset plantodc --variant lcga
+python train.py --config config.yaml --dataset plantodc --variant lcga-qk
+python train.py --config config.yaml --dataset plantodc --variant realformer
+
+# ---- resume (re-run the same command; resume: auto) or a specific checkpoint ----
+python train.py --config config.yaml --dataset plantodc
+python train.py --config config.yaml --dataset plantodc --resume runs/lcga_plantodc/checkpoints/epoch_020.pt
+
+# ---- predict / analyze ----
+python predict.py --ckpt runs/lcga_plantodc/best.pt --images some_folder/ --dynamic-exit --exit-mode both
+python analyze_lcga.py --ckpt runs/loopvit_plantodc/best.pt runs/lcga_plantodc/best.pt --labels vanilla lcga --out-dir analysis/plantodc
