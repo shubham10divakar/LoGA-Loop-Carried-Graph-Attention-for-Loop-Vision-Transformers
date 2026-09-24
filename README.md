@@ -40,6 +40,8 @@ qk      (eq. A3):        L̃_t = [Q_t K_tᵀ + γ_{b,h}(t) · Q_{t−1} K_{t−1
 | `data.py` | dataset lookup (`datasets/` and `dataset/`), ImageFolder pipeline, resumable sampler |
 | `downloads.py` | fetch aircraft / cub200 / flowers102 / food101 / cars into the `datasets/` layout |
 | `config.yaml` | every setting in one place |
+| `pretrained.py` | build the loop core from a pretrained timm ViT (`--pretrained`), or copy weights from a repo checkpoint (`--init-from`) |
+| `finetune.py` + `finetune.yaml` | paper experiments: pretrained ViT → vanilla LoopViT vs LCGA on cub200 / aircraft / flowers102 / food101 |
 | `tests/test_lcga.py` | tests T1–T9 from the design doc (+ extras) |
 | `tests/loop_vit_reference.py` | the original, unmodified LoopViT, used to prove baseline equivalence |
 
@@ -266,6 +268,34 @@ python train.py --config config.yaml --dataset plantvillage --variant realformer
 All other settings come from `config.yaml` (seed 42, lr 5e-4, 10 % stratified val split,
 T = 3, B = 4). `runs/<name>/run_history.log` records the exact command, time, git commit
 and resume point of every invocation, and `config.json` stores the full resolved settings.
+
+### 5.12 Paper experiments: fine-tuning from a pretrained ViT
+
+Training from scratch cannot get close to published results on small fine-grained datasets,
+and FGVC attention papers don't do that either. They fine-tune from ImageNet-pretrained
+weights. `--pretrained <timm ViT>` builds the loop core from the ViT's blocks
+(`--pretrained-blocks stepwise` = layers 0, 3, 6, 9 for 12 → 4) and sets the architecture to
+match it (LayerNorm, GELU MLP, no RoPE, LayerScale for DINOv2). The step embeddings are set
+to zero and γ starts at 0, so **vanilla LoopViT and LCGA start from the same function**, and
+any gap between them comes from LCGA.
+
+The paper compares two variants: `loopvit` (baseline) and `lcga` (LCGA-logprob, proposed).
+`finetune.py` runs both on every dataset with the recipe in `finetune.yaml` (DeiT-S IN-1k,
+AdamW lr 5e-5 with ×20 for head/γ/step embeddings, 2 warm-up epochs, TrivialAugment,
+batch 16, early stopping on val acc). Per-dataset epochs are set in `RECIPES`.
+
+```bash
+python downloads.py --dataset cub200 aircraft flowers102 food101
+python finetune.py                                                    # 4 datasets x {loopvit, lcga}
+python finetune.py --datasets cub200 aircraft --dry-run               # only print the commands
+python finetune.py --pretrained vit_small_patch14_dinov2.lvd142m      # stronger backbone
+python finetune.py --datasets cub200 --image-size 448 --batch-size 8  # unknown flags go to train.py
+```
+
+Runs go to `runs/<variant>_<dataset>_<backbone>/`, and re-running continues unfinished ones.
+`--core-depth 12 --loop-steps 1` gives the plain pretrained ViT as a reference number, and
+`--init-from <ckpt>` fine-tunes from one of your own checkpoints (e.g. PlantVillage →
+PlantDoc).
 
 ## 6. What is logged every epoch
 
