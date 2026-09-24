@@ -29,6 +29,10 @@ Configurable:
   * classes          - explicit list of folder names (overrides the two above)
   * max_per_class    - cap images per class (None = all)
   * val_split        - fraction of train held out per class when there is no val dir
+  * augment          - none | basic | trivial | plant (flips + rotation + colour jitter + blur)
+  * drop_classes_without_val - drop train classes that have no validation images
+  * smote            - add SMOTE images (blends of same-class nearest neighbours) to
+                       minority classes of the train split, up to smote_target images
 """
 from __future__ import annotations
 
@@ -38,6 +42,7 @@ from collections import defaultdict
 
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
+from PIL import Image
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import default_loader
 
@@ -142,6 +147,61 @@ class ResumableSampler(Sampler):
         return self.n - self.start
 
 
+class SmotePair:
+    """A synthetic SMOTE sample: x = (1 - lam) * a + lam * b, with b one of the k nearest
+    same-class neighbours of a. Both images are resized to `size` x `size` before
+    blending; the normal train transform (crop, flips, ...) is then applied to the result."""
+
+    def __init__(self, a: str, b: str, lam: float, size: int):
+        self.a, self.b, self.lam, self.size = a, b, lam, size
+
+    def load(self):
+        ia = default_loader(long_path(self.a)).resize((self.size, self.size))
+        ib = default_loader(long_path(self.b)).resize((self.size, self.size))
+        return Image.blend(ia, ib, self.lam)
+
+    def __repr__(self):
+        return f"SmotePair({os.path.basename(self.a)}, {os.path.basename(self.b)}, {self.lam:.2f})"
+
+
+def _thumb(path: str, side: int = 16) -> torch.Tensor:
+    with Image.open(long_path(path)) as im:
+        im = im.convert("RGB").resize((side, side), Image.BILINEAR)
+        return torch.frombuffer(bytearray(im.tobytes()), dtype=torch.uint8).float() / 255.0
+
+
+def smote_samples(by_class: dict, target, k: int, seed: int, size: int):
+    """SMOTE (Chawla et al., 2002) on images: for every class with fewer than `target`
+    train images, add synthetic samples that interpolate an image with one of its k
+    nearest same-class neighbours. Neighbours are found on 16x16 RGB thumbnails.
+
+    by_class: {label: [paths]}; target: "max" | "median" | int.
+    Returns [(SmotePair, label)], deterministic in `seed`."""
+    counts = {c: len(p) for c, p in by_class.items()}
+    if target == "max":
+        goal = max(counts.values())
+    elif target == "median":
+        goal = int(sorted(counts.values())[len(counts) // 2])
+    else:
+        goal = int(target)
+    rng = random.Random(seed)
+    out = []
+    for c in sorted(by_class):
+        paths = by_class[c]
+        need = goal - len(paths)
+        if need <= 0 or len(paths) < 2:
+            continue
+        feats = torch.stack([_thumb(p) for p in paths])
+        dist = torch.cdist(feats, feats)
+        dist.fill_diagonal_(float("inf"))
+        nn_idx = dist.topk(min(k, len(paths) - 1), largest=False).indices.tolist()
+        for _ in range(need):
+            i = rng.randrange(len(paths))
+            j = rng.choice(nn_idx[i])
+            out.append((SmotePair(paths[i], paths[j], rng.random(), size), c))
+    return out
+
+
 class SampleListDataset(Dataset):
     def __init__(self, samples, classes, transform=None):
         self.samples = samples          # list of (path, label)
@@ -153,7 +213,10 @@ class SampleListDataset(Dataset):
 
     def __getitem__(self, i):
         path, label = self.samples[i]
-        img = default_loader(long_path(path))      # PIL RGB
+        if isinstance(path, SmotePair):
+            img = path.load()
+        else:
+            img = default_loader(long_path(path))  # PIL RGB
         if self.transform is not None:
             img = self.transform(img)
         return img, label
@@ -167,6 +230,13 @@ def build_transforms(image_size: int, augment: str = "basic",
              transforms.RandomHorizontalFlip()]
     if augment == "trivial":
         train.append(transforms.TrivialAugmentWide())
+    elif augment == "plant":
+        # the usual plant-disease recipe (Mamba / ViT leaf-disease papers): leaves have no
+        # canonical orientation, and field photos vary in light, colour and focus
+        train += [transforms.RandomVerticalFlip(),
+                  transforms.RandomRotation(30),
+                  transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05),
+                  transforms.RandomApply([transforms.GaussianBlur(5, sigma=(0.1, 2.0))], p=0.2)]
     elif augment == "none":
         train = [transforms.Resize((image_size, image_size))]
     train += [transforms.ToTensor(), norm]
@@ -208,12 +278,20 @@ def build_dataloaders(train_dir, val_dir=None, image_size=224, batch_size=64,
                       num_workers=4, num_classes=None, class_selection="first",
                       classes=None, max_per_class=None, val_split=0.1,
                       augment="basic", seed=42, pin_memory=True,
-                      mean=IMAGENET_MEAN, std=IMAGENET_STD):
+                      mean=IMAGENET_MEAN, std=IMAGENET_STD, drop_classes_without_val=False,
+                      smote=False, smote_k=5, smote_target="max"):
     rng = random.Random(seed)
     train_tf, eval_tf = build_transforms(image_size, augment, mean, std)
 
     base = datasets.ImageFolder(train_dir)
     chosen = _select_classes(base.classes, num_classes, class_selection, classes, seed)
+    if drop_classes_without_val and val_dir:
+        vdirs = set(_subdirs(val_dir))
+        dropped = [c for c in chosen
+                   if c not in vdirs or not _has_images(os.path.join(val_dir, c))]
+        if dropped:
+            print(f"[data] dropping {len(dropped)} class(es) with no validation images: {dropped}")
+            chosen = [c for c in chosen if c not in dropped]
     name_to_label = {c: i for i, c in enumerate(chosen)}
     idx_to_name = {i: c for c, i in base.class_to_idx.items()}
 
@@ -240,6 +318,16 @@ def build_dataloaders(train_dir, val_dir=None, image_size=224, batch_size=64,
             val_samples += [(p, name_to_label[c]) for p in paths[:n_val]]
             train_samples += [(p, name_to_label[c]) for p in paths[n_val:]]
 
+    n_synth = 0
+    if smote:
+        by_label = defaultdict(list)
+        for p, y in train_samples:
+            by_label[y].append(p)
+        synth = smote_samples(by_label, smote_target, smote_k, seed,
+                              int(round(image_size / 0.875)))
+        n_synth = len(synth)
+        train_samples = train_samples + synth
+
     train_ds = SampleListDataset(train_samples, chosen, train_tf)
     val_ds = SampleListDataset(val_samples, chosen, eval_tf) if val_samples else None
 
@@ -257,6 +345,9 @@ def build_dataloaders(train_dir, val_dir=None, image_size=224, batch_size=64,
     for _, y in train_samples:
         counts[y] += 1
     print(f"[data] {len(base.classes)} class folders in {train_dir}; using {len(chosen)}")
+    if smote:
+        print(f"[data] SMOTE (k={smote_k}, target={smote_target}): +{n_synth} synthetic "
+              f"train images for minority classes")
     print(f"[data] train images: {len(train_ds)} | val images: {len(val_samples)}"
           f" ({'from ' + val_dir if val_dir else f'{val_split:.0%} split of train'})")
     preview = ", ".join(f"{c}={counts[i]}" for i, c in enumerate(chosen[:10]))

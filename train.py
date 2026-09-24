@@ -105,7 +105,15 @@ def get_args(argv=None):
     d.add_argument("--classes", nargs="*", default=None, help="explicit class folder names")
     d.add_argument("--max-per-class", type=int_or_none, default=None)
     d.add_argument("--val-split", type=float, default=0.1)
-    d.add_argument("--augment", choices=["none", "basic", "trivial"], default="basic")
+    d.add_argument("--augment", choices=["none", "basic", "trivial", "plant"], default="basic",
+                   help="plant = flips (h+v), rotation 30, colour jitter, blur (plantdoc.yaml)")
+    d.add_argument("--drop-classes-without-val", type=str2bool, default=False,
+                   help="drop train classes that have no validation images")
+    d.add_argument("--smote", type=str2bool, default=False,
+                   help="add SMOTE images (same-class nearest-neighbour blends) to minority classes")
+    d.add_argument("--smote-k", type=int, default=5, help="SMOTE nearest neighbours")
+    d.add_argument("--smote-target", type=str, default="max",
+                   help="grow each class to: max | median | an image count")
     d.add_argument("--num-workers", type=int, default=4)
 
     m = p.add_argument_group("model")
@@ -447,7 +455,9 @@ def main():
             train_dir, val_dir, args.image_size, args.batch_size,
             args.num_workers, args.num_classes, args.class_selection, args.classes,
             args.max_per_class, args.val_split, args.augment, args.seed,
-            pin_memory=device.type == "cuda", mean=in_mean, std=in_std)
+            pin_memory=device.type == "cuda", mean=in_mean, std=in_std,
+            drop_classes_without_val=args.drop_classes_without_val, smote=args.smote,
+            smote_k=args.smote_k, smote_target=args.smote_target)
 
     # ---- model --------------------------------------------------------------
     mcfg = LoopViTConfig(

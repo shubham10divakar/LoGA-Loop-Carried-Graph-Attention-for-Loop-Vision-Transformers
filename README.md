@@ -41,6 +41,7 @@ qk      (eq. A3):        L̃_t = [Q_t K_tᵀ + γ_{b,h}(t) · Q_{t−1} K_{t−1
 | `downloads.py` | fetch aircraft / cub200 / flowers102 / food101 / cars into the `datasets/` layout |
 | `config.yaml` | every setting in one place |
 | `pretrained.py` | build the loop core from a pretrained timm ViT (`--pretrained`), or copy weights from a repo checkpoint (`--init-from`) |
+| `plantdoc.yaml` | PlantDoc settings, improved step by step (plant augmentation, optional SMOTE) |
 | `finetune.py` + `finetune.yaml` | paper experiments: pretrained ViT → vanilla LoopViT vs LCGA on cub200 / aircraft / flowers102 / food101 |
 | `tests/test_lcga.py` | tests T1–T9 from the design doc (+ extras) |
 | `tests/loop_vit_reference.py` | the original, unmodified LoopViT, used to prove baseline equivalence |
@@ -296,6 +297,34 @@ Runs go to `runs/<variant>_<dataset>_<backbone>/`, and re-running continues unfi
 `--core-depth 12 --loop-steps 1` gives the plain pretrained ViT as a reference number, and
 `--init-from <ckpt>` fine-tunes from one of your own checkpoints (e.g. PlantVillage →
 PlantDoc).
+
+### 5.13 PlantDoc, improved step by step
+
+`plantdoc.yaml` holds the PlantDoc settings. It uses the pretrained fine-tuning recipe
+above, the `plant` augmentation, and drops train classes that have no test images. Each
+improvement is behind a flag so versions can be compared:
+
+| version | what | flag |
+|---|---|---|
+| v1 | pretrained DeiT-S + plant augmentation (h+v flips, rotation ±30°, colour jitter, blur on 20 % of images) | `--augment plant` (default in `plantdoc.yaml`) |
+| v2 | v1 + SMOTE: extra train images for small classes, each a blend of an image and one of its k = 5 nearest same-class neighbours | `--smote true` (`--smote-k`, `--smote-target max\|median\|N`) |
+
+The augmentation is the usual plant-disease recipe, not a copy of any single paper. SMOTE
+only changes the train split. With `--smote-target max`, every class grows to 223 images
+(+3,353 synthetic), so an epoch takes about 2.3× longer.
+
+```bash
+# v1: pretrained + plant augmentation
+python train.py --config plantdoc.yaml --variant loopvit --resume auto --output-dir runs/plantdoc/v1_loopvit
+python train.py --config plantdoc.yaml --variant lcga    --resume auto --output-dir runs/plantdoc/v1_lcga
+
+# v2: v1 + SMOTE
+python train.py --config plantdoc.yaml --variant loopvit --smote true --resume auto --output-dir runs/plantdoc/v2_smote_loopvit
+python train.py --config plantdoc.yaml --variant lcga    --smote true --resume auto --output-dir runs/plantdoc/v2_smote_lcga
+```
+
+Give every version its own `--output-dir`. The resume check only compares model settings,
+so `--resume auto` can't tell two augmentation or SMOTE versions apart.
 
 ## 6. What is logged every epoch
 

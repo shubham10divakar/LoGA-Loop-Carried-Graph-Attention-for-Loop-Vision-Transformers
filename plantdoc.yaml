@@ -1,0 +1,98 @@
+# PlantDoc settings (dataset/plantodc/{train,test}), improved step by step.
+# Starts from the pretrained fine-tuning recipe (finetune.yaml). Each change is behind a
+# flag, so versions can be compared by switching it on the command line:
+#   v1  pretrained DeiT-S + plant augmentation                     (this file as-is)
+#   v2  v1 + SMOTE for minority classes                           (--smote true)
+# Give every version its own --output-dir (runs/plantdoc/<version>_<variant>): augmentation
+# and SMOTE are not part of the model config, so `resume: auto` cannot tell runs apart.
+
+# ---------------- data ----------------
+dataset: plantodc               # dataset/plantodc/{train,test}
+data_root: datasets
+train_dir: null                # set this to bypass the dataset-name lookup
+val_dir: null                  # optional; if null, val_split of train is held out
+num_classes: null              # null = every class folder; N = use N of them
+class_selection: first         # first (alphabetical) | random (seeded) when N < total
+classes: null                  # or an explicit list, e.g. [cat, dog, horse]
+max_per_class: null            # cap images per class (null = all)
+val_split: 0.1
+augment: plant                 # none | basic | trivial | plant (h+v flips, rotation 30,
+                               #   colour jitter, blur: the usual plant-disease recipe)
+drop_classes_without_val: true # Tomato_two_spotted_spider_mites_leaf: 2 train, 0 test images
+smote: false                   # true = SMOTE images for minority classes (train split only)
+smote_k: 5                     # nearest same-class neighbours to interpolate with
+smote_target: max              # grow each class to: max | median | an image count
+num_workers: 4                 # use 0 on Windows if worker startup stalls
+
+# ---------------- model ----------------
+image_size: 224
+patch_size: 16
+dim: 384
+core_depth: 4                  # B: distinct hybrid blocks in the weight-tied core
+loop_steps: 3                  # T: iterations of the core during training
+num_heads: 6
+mlp_ratio: 4.0                 # ConvGLU hidden = dim * mlp_ratio
+dropout: 0.0
+attn_dropout: 0.0
+drop_path: 0.1
+ffn: hybrid                    # hybrid (ConvGLU + 3x3 DW-Conv) | vanilla (plain MLP ablation)
+rope: true                     # 2D rotary embeddings
+step_embedding: true           # e_t in z_{t+1} = M(z_t + e_t)
+num_cls_tokens: 1              # the paper's task tokens; they bypass the DW-Conv
+pool: cls                      # cls | mean
+norm: rms                      # rms (paper) | layer; --pretrained sets layer
+layer_scale: 0.0               # LayerScale init, 0 = off; --pretrained sets it for DINOv2
+
+# ---------------- pretrained initialisation (pretrained.py) ----------------
+pretrained: deit_small_patch16_224.fb_in1k   # or vit_small_patch14_dinov2.lvd142m (stronger)
+                               # (sets dim/heads/patch/mlp_ratio/ffn=vanilla/rope=false/norm=layer to match)
+pretrained_blocks: stepwise    # stepwise | lower | average | "0,3,6,9": which pretrained layers form the core
+init_from: null                # repo checkpoint to fine-tune from (e.g. PlantVillage -> PlantDoc)
+new_param_lr_mult: 20.0        # head + gamma + step embeddings learn at 20x the backbone lr
+
+# ---------------- LCGA: loop-carried graph attention ----------------
+variant: null                  # preset: loopvit | lcga | lcga-logprob | lcga-qk | realformer
+attn_carry: logprob            # none (vanilla LoopViT) | logprob (LCGA, main) | qk | realformer (control)
+carry_gamma_init: 0.0          # 0 => identical to vanilla LoopViT at init
+carry_gamma_per_step: false    # one gamma per (step, block, head) instead of per (block, head)
+carry_gamma_learnable: true    # false + carry_gamma_init 1.0 = "gamma fixed at 1" ablation
+carry_detach: false            # stop-gradient through the carried graph (saves memory)
+carry_clamp: -10.0             # floor on log A_{t-1} in logprob mode
+carry_source: same             # same (b -> b) | shifted (b -> b+1) ablation
+
+# ---------------- dynamic exit (inference) ----------------
+exit_mode: entropy             # entropy | graph | both | either
+exit_tau: 0.05                 # halt a sample once its predictive entropy (nats) < tau
+exit_graph_eps: 0.01           # ... or once its CLS attention graph changes less than this (nats)
+min_loop_steps: 1
+max_loop_steps: 0              # inference budget; 0 = loop_steps. Try 2x loop_steps.
+eval_dynamic_exit: true        # report exit accuracy / steps / block applications each epoch
+eval_extrapolate: true         # report val accuracy at T+1..2T each epoch
+progress: true                 # live progress bar per train epoch / val pass (needs tqdm)
+
+# ---------------- training ----------------
+epochs: 50
+batch_size: 16                 # logprob stores N*h*T_tok^2 per block-step
+lr: 0.00005                    # backbone lr (fine-tuning)
+min_lr: 0.000001
+weight_decay: 0.05
+warmup_epochs: 2
+label_smoothing: 0.1
+grad_clip: 1.0
+deep_supervision: 0.0          # >0 also supervises intermediate steps (not in the paper)
+amp: true
+seed: 42
+device: auto                   # auto | cuda | mps | cpu
+output_dir: null               # null = runs/<variant>_<dataset>
+
+# ---------------- checkpoints / resume ----------------
+resume: auto                   # auto = continue from <output_dir>/last.pt if present | path | null
+save_every: 1                  # checkpoints/epoch_XXX.pt every N epochs (0 = off)
+keep_checkpoints: 2            # keep only the newest 2 epoch checkpoints (best.pt / last.pt always kept)
+save_every_steps: 0            # also refresh last.pt every N optimizer steps inside an epoch
+
+# ---------------- early stopping ----------------
+early_stopping: true
+patience: 15                   # epochs without improvement before stopping
+min_delta: 0.0                 # improvement that counts as progress
+monitor: val_acc               # val_acc | val_loss

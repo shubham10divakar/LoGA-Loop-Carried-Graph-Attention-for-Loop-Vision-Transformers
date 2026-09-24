@@ -45,3 +45,11 @@ python analyze_lcga.py --ckpt runs/loopvit_cub200_deit_small_patch16_224/best.pt
 
 # ---- PlantVillage -> PlantDoc (fine-tune one of your own checkpoints; same variant on both) ----
 python train.py --config config.yaml --dataset plantodc --variant lcga --init-from runs/lcga_plantvillage/best.pt --lr 1e-4 --new-param-lr-mult 10 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/lcga_plantodc_ft
+
+# ---- PlantDoc, improved step by step (plantdoc.yaml; one --output-dir per version) ----
+# v1: pretrained DeiT-S + plant augmentation (h+v flips, rotation 30, colour jitter, blur)
+python train.py --config plantdoc.yaml --variant loopvit --resume auto --output-dir runs/plantdoc/v1_loopvit
+python train.py --config plantdoc.yaml --variant lcga    --resume auto --output-dir runs/plantdoc/v1_lcga
+# v2: v1 + SMOTE for minority classes
+python train.py --config plantdoc.yaml --variant loopvit --smote true --resume auto --output-dir runs/plantdoc/v2_smote_loopvit
+python train.py --config plantdoc.yaml --variant lcga    --smote true --resume auto --output-dir runs/plantdoc/v2_smote_lcga
