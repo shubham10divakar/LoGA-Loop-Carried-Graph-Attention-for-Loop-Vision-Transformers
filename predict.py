@@ -20,7 +20,7 @@ import os
 import torch
 from PIL import Image
 
-from data import build_transforms
+from data import build_transforms, long_path
 from loop_vit import LoopViT, LoopViTConfig, graph_delta
 
 EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
@@ -72,7 +72,7 @@ def main():
     with torch.no_grad():
         for i in range(0, len(paths), args.batch_size):
             chunk = paths[i:i + args.batch_size]
-            x = torch.stack([tf(Image.open(pth).convert("RGB")) for pth in chunk]).to(device)
+            x = torch.stack([tf(Image.open(long_path(pth)).convert("RGB")) for pth in chunk]).to(device)
 
             if args.dynamic_exit:
                 out = model.dynamic_forward(x, tau=args.exit_tau, max_steps=steps,

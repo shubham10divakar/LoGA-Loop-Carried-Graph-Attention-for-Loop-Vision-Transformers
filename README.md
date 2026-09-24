@@ -94,6 +94,9 @@ dataset/plantvillage/color/<class>/*.jpg              # flat: 10 % held out for 
   `plantvillage/color/`, is descended into automatically. `--dataset plantvillage/color` also works.
 * A flat folder (class folders directly inside it) gets a stratified `--val-split` hold-out.
 * `--train-dir` / `--val-dir` accept any path on disk and skip the name lookup.
+* On Windows, image paths longer than the 260-character `MAX_PATH` limit (common for
+  PlantVillage inside a deeply nested folder) are opened through the `\\?\` long-path
+  prefix, so you don't need to enable `LongPathsEnabled` or move the repo.
 
 Fetch the public benchmarks again if needed:
 
@@ -241,6 +244,29 @@ Outputs:
 | `exit_pareto.png` | accuracy vs mean block applications for entropy / graph / both / either exits |
 | `summary.json` | every number behind the figures |
 
+### 5.11 Replication: PlantVillage runs
+
+The exact command used for the PlantVillage baseline (vanilla LoopViT). It sets 100 epochs
+and batch size 16, saves a checkpoint for every epoch and keeps them all, early-stops when
+val loss hasn't improved for 10 epochs, and resumes automatically if you re-run it:
+
+```bash
+python train.py --config config.yaml --dataset plantvillage --variant loopvit --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/loopvit_plantvillage
+```
+
+For a fair comparison, run the other variants with the same settings. Only `--variant` and
+`--output-dir` change:
+
+```bash
+python train.py --config config.yaml --dataset plantvillage --variant lcga       --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga_plantvillage
+python train.py --config config.yaml --dataset plantvillage --variant lcga-qk    --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga-qk_plantvillage
+python train.py --config config.yaml --dataset plantvillage --variant realformer --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/realformer_plantvillage
+```
+
+All other settings come from `config.yaml` (seed 42, lr 5e-4, 10 % stratified val split,
+T = 3, B = 4). `runs/<name>/run_history.log` records the exact command, time, git commit
+and resume point of every invocation, and `config.json` stores the full resolved settings.
+
 ## 6. What is logged every epoch
 
 ```
@@ -263,7 +289,14 @@ epoch  12/100 | lr 4.31e-04 | train loss 1.8123 acc 0.4712 | 212 img/s, 5.84 GB
   block-step, so it uses more memory than `qk` / vanilla.
 
 Files in `runs/<name>/`: `log.csv`, `metrics.jsonl` (full per-epoch record including raw γ),
-`gamma_heatmap.png` (latest epoch), `config.json`, `last.pt`, `best.pt`, `checkpoints/`.
+`gamma_heatmap.png` (latest epoch), `config.json`, `last.pt`, `best.pt`, `checkpoints/`,
+and `run_history.log`. That last file is only ever appended to. For every invocation,
+including each resume, it records the timestamp, exact command, working directory, git
+commit, Python and torch versions, the resume point, and how the run ended (`END`,
+`INTERRUPTED`, `FAILED` or `CRASHED`).
+
+During an epoch a live `tqdm` bar shows batch progress, time left, and the running loss,
+accuracy and lr. A second bar shows the validation pass. Turn both off with `--progress false`.
 
 ## 7. Configuration reference
 

@@ -26,6 +26,9 @@ Checkpoints (all in --output-dir, default runs/<variant>_<dataset>):
     checkpoints/epoch_XXX.pt  every --save-every epochs (--keep-checkpoints N keeps the newest N)
 Each one holds model, optimizer, AMP scaler, RNG, schedule position, early-stopping
 counter and position inside the epoch, so any of them can be passed to --resume.
+run_history.log (append-only) records every invocation: timestamp, exact command,
+cwd, git commit, resume point, and how it ended (done / early-stopped /
+interrupted / failed / crashed).
 
 Training follows the paper's fixed-depth protocol: the core is unrolled
 `loop_steps` times and only the final output is supervised. Every epoch also
@@ -43,11 +46,19 @@ import json
 import math
 import os
 import random
+import shlex
 import shutil
+import subprocess
+import sys
 import time
 
 import torch
 import torch.nn as nn
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
 
 from data import build_dataloaders, resolve_dataset_dirs
 from loop_vit import LoopViT, LoopViTConfig, graph_delta, print_model_summary
@@ -145,6 +156,8 @@ def get_args(argv=None):
                    help="also evaluate with dynamic exit each epoch")
     t.add_argument("--eval-extrapolate", type=str2bool, default=True,
                    help="also report val accuracy at T+1..2T each epoch")
+    t.add_argument("--progress", type=str2bool, default=True,
+                   help="live progress bar for each train epoch and val pass (needs tqdm)")
 
     c = p.add_argument_group("checkpoints / resume")
     c.add_argument("--resume", type=str_or_none, default=None,
@@ -196,6 +209,14 @@ def seed_all(seed):
     torch.cuda.manual_seed_all(seed)
 
 
+def progress_bar(iterable, enabled: bool, **kw):
+    """tqdm bar that clears itself when done (the per-epoch summary line stays);
+    plain iterable when disabled or tqdm is not installed."""
+    if enabled and tqdm is not None:
+        return tqdm(iterable, dynamic_ncols=True, leave=False, **kw)
+    return iterable
+
+
 def cosine_lr(step, total, warmup, base, min_lr):
     if step < warmup:
         return base * (step + 1) / warmup
@@ -241,6 +262,36 @@ def atomic_save(obj, path: str):
     os.replace(tmp, path)
 
 
+_history_dir = None     # set once the run's output dir is known, for crash logging
+
+
+def log_history(event: str, detail: str = ""):
+    """Append a timestamped line to <output_dir>/run_history.log. The file is only ever
+    appended to, so it keeps every invocation of the run, including resumes."""
+    if not _history_dir:
+        return
+    with open(os.path.join(_history_dir, "run_history.log"), "a", encoding="utf-8") as f:
+        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {event:<11} {detail}\n")
+
+
+def log_run_start(out_dir: str, resume):
+    global _history_dir
+    _history_dir = out_dir
+    argv = [os.path.basename(sys.executable)] + sys.argv
+    cmd = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                                text=True, cwd=os.path.dirname(os.path.abspath(__file__)),
+                                timeout=5).stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    log_history("START", f"resume from {resume}" if resume else "fresh start")
+    with open(os.path.join(out_dir, "run_history.log"), "a", encoding="utf-8") as f:
+        f.write(f"    cmd:    {cmd}\n    cwd:    {os.getcwd()}\n"
+                f"    git:    {commit}\n    python: {sys.version.split()[0]}, "
+                f"torch {torch.__version__}\n")
+
+
 def fmt_list(xs, f="{:.3f}"):
     return " ".join("nan" if (x is None or (isinstance(x, float) and math.isnan(x)))
                     else f.format(x) for x in xs)
@@ -248,7 +299,7 @@ def fmt_list(xs, f="{:.3f}"):
 
 @torch.no_grad()
 def evaluate(model, loader, device, criterion, use_amp=False, amp_dtype=torch.float16,
-             extrap=True, dynamic_exit=False):
+             extrap=True, dynamic_exit=False, progress=False):
     """Validation pass (design A, sec. 6): accuracy / entropy / Delta_t after every
     step 1..S (S = 2T with `extrap`, else T), plus optional dynamic exit."""
     model.eval()
@@ -258,7 +309,7 @@ def evaluate(model, loader, device, criterion, use_amp=False, amp_dtype=torch.fl
     n, loss_sum = 0, 0.0
     hits, ent_sum, delta_sum = [0] * S, [0.0] * S, [0.0] * S
     dyn_correct, dyn_steps, dyn_apps = 0, 0.0, 0
-    for x, y in loader:
+    for x, y in progress_bar(loader, progress, desc="  val", unit="batch"):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
             if graphs_on:
@@ -385,6 +436,7 @@ def main():
         cand = os.path.join(args.output_dir, "last.pt")
         resume = cand if os.path.exists(cand) else None
         print(f"[resume] auto: {'found ' + cand if resume else 'no last.pt, starting fresh'}")
+    log_run_start(args.output_dir, resume)
 
     start_epoch, step, best_acc, best_score, stale = 1, 0, -1.0, None, 0
     skip_batches, partial = 0, None
@@ -422,14 +474,17 @@ def main():
                  else f"start of epoch {start_epoch}")
         print(f"[resume] resuming at {where} (step {step}), best_acc {best_acc:.4f}, "
               f"{stale} epoch(s) without improvement")
+        log_history("RESUMED", f"at {where} (step {step}), best_acc {best_acc:.4f}")
         truncate_logs(args.output_dir, start_epoch - 1)
         if args.early_stopping and stale >= args.patience and not skip_batches:
             print(f"[resume] this run already early-stopped ({stale} >= patience {args.patience}). "
                   f"Raise --patience or pass --early-stopping false to keep training.")
+            log_history("END", "nothing to do: run already early-stopped")
             return
         if start_epoch > args.epochs:
             print(f"[resume] already trained for {start_epoch - 1} epochs "
                   f"(--epochs {args.epochs}). Raise --epochs to continue.")
+            log_history("END", f"nothing to do: already trained {start_epoch - 1} epochs")
             return
 
     with open(os.path.join(args.output_dir, "config.json"), "w") as f:
@@ -472,8 +527,10 @@ def main():
         lr = cosine_lr(max(step - 1, 0), total_steps, warmup_steps, args.lr, args.min_lr)
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
+        bar = progress_bar(train_loader, args.progress, total=steps_per_epoch, initial=skip,
+                           desc=f"epoch {epoch}/{args.epochs}", unit="batch")
         try:
-            for x, y in train_loader:
+            for x, y in bar:
                 lr = cosine_lr(step, total_steps, warmup_steps, args.lr, args.min_lr)
                 for g in opt.param_groups:
                     g["lr"] = lr
@@ -505,6 +562,10 @@ def main():
                 st["loss_sum"] += loss.item() * y.size(0)
                 st["correct"] += (logits.argmax(1) == y).sum().item()
                 st["n"] += y.size(0)
+                if bar is not train_loader and done_in_epoch % 10 == 0:
+                    bar.set_postfix(loss=f"{st['loss_sum'] / st['n']:.4f}",
+                                    acc=f"{st['correct'] / st['n']:.4f}", lr=f"{lr:.2e}",
+                                    refresh=False)
                 if args.save_every_steps and step % args.save_every_steps == 0:
                     atomic_save(make_ckpt(epoch - 1, done_in_epoch, dict(st)), last_path)
         except KeyboardInterrupt:
@@ -512,6 +573,8 @@ def main():
             print(f"\n[interrupted] saved {last_path} at epoch {epoch}, batch "
                   f"{done_in_epoch}/{steps_per_epoch}. Re-run the same command "
                   f"(resume: auto) or pass --resume {last_path} to continue.")
+            log_history("INTERRUPTED", f"Ctrl+C at epoch {epoch}, batch {done_in_epoch}/"
+                                       f"{steps_per_epoch}; saved {last_path}")
             raise SystemExit(130)
         train_sec = time.time() - t0
         peak_mem = torch.cuda.max_memory_allocated(device) / 1024 ** 3 if device.type == "cuda" else 0.0
@@ -520,12 +583,14 @@ def main():
         try:
             tr = {"loss": st["loss_sum"] / max(st["n"], 1), "acc": st["correct"] / max(st["n"], 1)}
             va = (evaluate(model, val_loader, device, eval_criterion, use_amp, amp_dtype,
-                           extrap=args.eval_extrapolate, dynamic_exit=args.eval_dynamic_exit)
+                           extrap=args.eval_extrapolate, dynamic_exit=args.eval_dynamic_exit,
+                           progress=args.progress)
                   if val_loader else {})
         except KeyboardInterrupt:
             atomic_save(make_ckpt(epoch - 1, steps_per_epoch, dict(st)), last_path)
             print(f"\n[interrupted during eval] saved {last_path}; resuming re-runs this "
                   f"epoch's evaluation only.")
+            log_history("INTERRUPTED", f"Ctrl+C during eval of epoch {epoch}; saved {last_path}")
             raise SystemExit(130)
         sec = time.time() - t0
 
@@ -602,7 +667,17 @@ def main():
     tag = "early-stopped" if stopped_early else "done"
     print(f"{tag}. best {monitor} {best_score:.4f} (best acc {best_acc:.4f}) "
           f"-> {args.output_dir}/best.pt")
+    log_history("END", f"{tag} after epoch {epoch}, best {monitor} {best_score:.4f}, "
+                       f"best acc {best_acc:.4f}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (None, 0, 130):         # 130 = Ctrl+C, already logged
+            log_history("FAILED", str(e.code).splitlines()[0])
+        raise
+    except BaseException as e:
+        log_history("CRASHED", f"{type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}")
+        raise

@@ -25,3 +25,9 @@ python train.py --config config.yaml --dataset plantodc --resume runs/lcga_plant
 # ---- predict / analyze ----
 python predict.py --ckpt runs/lcga_plantodc/best.pt --images some_folder/ --dynamic-exit --exit-mode both
 python analyze_lcga.py --ckpt runs/loopvit_plantodc/best.pt runs/lcga_plantodc/best.pt --labels vanilla lcga --out-dir analysis/plantodc
+
+# ---- replication: PlantVillage (same settings for every variant) ----
+python train.py --config config.yaml --dataset plantvillage --variant loopvit    --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/loopvit_plantvillage
+python train.py --config config.yaml --dataset plantvillage --variant lcga       --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga_plantvillage
+python train.py --config config.yaml --dataset plantvillage --variant lcga-qk    --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga-qk_plantvillage
+python train.py --config config.yaml --dataset plantvillage --variant realformer --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/realformer_plantvillage

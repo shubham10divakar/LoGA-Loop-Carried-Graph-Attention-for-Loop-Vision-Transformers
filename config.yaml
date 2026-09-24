@@ -50,6 +50,7 @@ min_loop_steps: 1
 max_loop_steps: 0              # inference budget; 0 = loop_steps. Try 2x loop_steps.
 eval_dynamic_exit: true        # report exit accuracy / steps / block applications each epoch
 eval_extrapolate: true         # report val accuracy at T+1..2T each epoch
+progress: true                 # live progress bar per train epoch / val pass (needs tqdm)
 
 # ---------------- training ----------------
 epochs: 100

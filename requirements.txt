@@ -5,4 +5,5 @@ pillow
 matplotlib     # gamma heatmap during training + analyze_lcga.py figures
 pytest         # tests/
 torchinfo      # optional: layer-by-layer table in the model summary
+tqdm           # optional: live progress bars during training
 scipy          # optional: only for downloads.py --dataset cars

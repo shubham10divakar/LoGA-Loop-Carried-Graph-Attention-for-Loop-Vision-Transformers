@@ -49,6 +49,17 @@ FALLBACK_ROOTS = ("datasets", "dataset")
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".ppm", ".pgm")
 
 
+def long_path(path: str) -> str:
+    """On Windows, return an extended-length (\\\\?\\) path so files past the 260-char
+    MAX_PATH limit still open (e.g. PlantVillage inside a deeply nested repo)."""
+    if os.name != "nt" or path.startswith("\\\\?\\"):
+        return path
+    p = os.path.abspath(path)
+    if len(p) < 240:
+        return path
+    return "\\\\?\\UNC\\" + p[2:] if p.startswith("\\\\") else "\\\\?\\" + p
+
+
 def _has_class_dirs(path: str) -> bool:
     return os.path.isdir(path) and any(
         os.path.isdir(os.path.join(path, d)) for d in os.listdir(path))
@@ -142,7 +153,7 @@ class SampleListDataset(Dataset):
 
     def __getitem__(self, i):
         path, label = self.samples[i]
-        img = default_loader(path)      # PIL RGB
+        img = default_loader(long_path(path))      # PIL RGB
         if self.transform is not None:
             img = self.transform(img)
         return img, label
