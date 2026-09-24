@@ -77,6 +77,11 @@ class LoopViTConfig:
     step_embedding: bool = True  # e_t in eq. (2)
     num_cls_tokens: int = 1      # the paper's "task tokens"; they bypass the DW-Conv
     pool: str = "cls"            # "cls" | "mean"
+    norm: str = "rms"            # "rms" (paper) | "layer" (LayerNorm, eps 1e-6, for timm ViT weights)
+    layer_scale: float = 0.0     # >0: per-channel LayerScale on both branches, init to this
+                                 # value (DINOv2-style); 0 = off
+    input_mean: tuple = (0.485, 0.456, 0.406)   # input normalisation the weights expect
+    input_std: tuple = (0.229, 0.224, 0.225)    # (ImageNet; 0.5s for augreg ViTs)
 
     # dynamic exit (inference only)
     exit_tau: float = 0.05       # halt a sample once its entropy (nats) drops below this
@@ -127,6 +132,14 @@ class RMSNorm(nn.Module):
         x32 = x.float()
         x32 = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
         return x32.to(dtype) * self.weight
+
+
+def make_norm(kind: str, dim: int) -> nn.Module:
+    if kind == "rms":
+        return RMSNorm(dim)
+    if kind == "layer":
+        return nn.LayerNorm(dim, eps=1e-6)
+    raise ValueError(f"norm must be 'rms' or 'layer', got {kind!r}")
 
 
 class PatchEmbed(nn.Module):
@@ -335,27 +348,33 @@ class HybridBlock(nn.Module):
     def __init__(self, cfg: LoopViTConfig, grid: int):
         super().__init__()
         hidden = int(cfg.dim * cfg.mlp_ratio)
-        self.norm1 = RMSNorm(cfg.dim)
+        self.norm1 = make_norm(cfg.norm, cfg.dim)
         self.attn = Attention(cfg.dim, cfg.num_heads, grid, cfg.num_cls_tokens,
                               cfg.qkv_bias, cfg.attn_dropout, cfg.dropout, cfg.rope,
                               carry=cfg.attn_carry, gamma_init=cfg.carry_gamma_init,
                               gamma_steps=cfg.loop_steps if cfg.carry_gamma_per_step else 1,
                               detach=cfg.carry_detach, clamp=cfg.carry_clamp,
                               gamma_learnable=cfg.carry_gamma_learnable)
-        self.norm2 = RMSNorm(cfg.dim)
+        self.norm2 = make_norm(cfg.norm, cfg.dim)
         if cfg.ffn == "hybrid":
             self.ffn = HeteroConvGLU(cfg.dim, hidden, grid, cfg.num_cls_tokens, cfg.dropout)
         elif cfg.ffn == "vanilla":
             self.ffn = MLP(cfg.dim, hidden, cfg.dropout)
         else:
             raise ValueError(f"ffn must be 'hybrid' or 'vanilla', got {cfg.ffn!r}")
+        # LayerScale only exists when enabled, so default models keep their state-dict keys
+        ls = cfg.layer_scale
+        self.ls1 = nn.Parameter(torch.full((cfg.dim,), float(ls))) if ls > 0 else None
+        self.ls2 = nn.Parameter(torch.full((cfg.dim,), float(ls))) if ls > 0 else None
 
     def forward(self, x, dp: float = 0.0, state=None, t: int = 0, need_cls: bool = False):
         # When drop_path drops the attention branch for a sample, its graph state
         # is still computed and carried, so the graph stays well-defined (sec. 4.2).
         a = self.attn(self.norm1(x), state=state, t=t, need_cls=need_cls)
-        x = x + drop_path(a.out, dp, self.training)
-        x = x + drop_path(self.ffn(self.norm2(x)), dp, self.training)
+        out = a.out if self.ls1 is None else a.out * self.ls1
+        x = x + drop_path(out, dp, self.training)
+        f = self.ffn(self.norm2(x))
+        x = x + drop_path(f if self.ls2 is None else f * self.ls2, dp, self.training)
         return x, a.state, a.cls_probs
 
 
@@ -430,7 +449,7 @@ class LoopViT(nn.Module):
         self.step_embed = (nn.Parameter(torch.zeros(cfg.loop_steps, 1, 1, D))
                            if cfg.step_embedding else None)
 
-        self.norm = RMSNorm(D)
+        self.norm = make_norm(cfg.norm, D)
         self.head = nn.Linear(D, cfg.num_classes)
         self._init_weights()
 
@@ -701,7 +720,7 @@ def print_model_summary(model: LoopViT, batch_size: int = 1, device="cpu"):
         for t in range(cfg.loop_steps))
     print(f" unrolled: {unrolled}  (every iteration reuses blocks 1-{cfg.core_depth})")
     print(f" ffn={cfg.ffn}, rope={cfg.rope}, step_embedding={cfg.step_embedding}, "
-          f"drop_path={cfg.drop_path}")
+          f"drop_path={cfg.drop_path}, norm={cfg.norm}, layer_scale={cfg.layer_scale}")
     if cfg.attn_carry != "none":
         print(f" LCGA: attn_carry={cfg.attn_carry}, gamma_init={cfg.carry_gamma_init}, "
               f"per_step={cfg.carry_gamma_per_step}, learnable={cfg.carry_gamma_learnable}, "

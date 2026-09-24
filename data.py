@@ -159,9 +159,10 @@ class SampleListDataset(Dataset):
         return img, label
 
 
-def build_transforms(image_size: int, augment: str = "basic"):
+def build_transforms(image_size: int, augment: str = "basic",
+                     mean=IMAGENET_MEAN, std=IMAGENET_STD):
     resize = int(round(image_size / 0.875))
-    norm = transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)
+    norm = transforms.Normalize(tuple(mean), tuple(std))
     train = [transforms.RandomResizedCrop(image_size, scale=(0.6, 1.0)),
              transforms.RandomHorizontalFlip()]
     if augment == "trivial":
@@ -206,9 +207,10 @@ def _group(samples, idx_to_name, keep, max_per_class, rng):
 def build_dataloaders(train_dir, val_dir=None, image_size=224, batch_size=64,
                       num_workers=4, num_classes=None, class_selection="first",
                       classes=None, max_per_class=None, val_split=0.1,
-                      augment="basic", seed=42, pin_memory=True):
+                      augment="basic", seed=42, pin_memory=True,
+                      mean=IMAGENET_MEAN, std=IMAGENET_STD):
     rng = random.Random(seed)
-    train_tf, eval_tf = build_transforms(image_size, augment)
+    train_tf, eval_tf = build_transforms(image_size, augment, mean, std)
 
     base = datasets.ImageFolder(train_dir)
     chosen = _select_classes(base.classes, num_classes, class_selection, classes, seed)

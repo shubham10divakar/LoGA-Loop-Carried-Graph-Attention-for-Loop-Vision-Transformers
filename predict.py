@@ -50,7 +50,7 @@ def main():
     model.load_state_dict(ckpt["model"])
     model.eval().to(device)
     classes = ckpt["classes"]
-    _, tf = build_transforms(cfg.image_size)
+    _, tf = build_transforms(cfg.image_size, mean=cfg.input_mean, std=cfg.input_std)
 
     paths = []
     for item in args.images:

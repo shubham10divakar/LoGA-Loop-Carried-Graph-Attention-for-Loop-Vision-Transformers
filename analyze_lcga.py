@@ -216,10 +216,11 @@ def main():
         args.data_root or targs.get("data_root", "datasets"), args.dataset or targs.get("dataset"),
         args.train_dir or targs.get("train_dir"), args.val_dir or targs.get("val_dir"))
     img_size = models[0][0].cfg.image_size
+    in_mean, in_std = models[0][0].cfg.input_mean, models[0][0].cfg.input_std
     train_loader, val_loader, names = build_dataloaders(
         tr_dir, va_dir, img_size, args.batch_size, args.num_workers,
         None, "first", classes, targs.get("max_per_class"), targs.get("val_split", 0.1),
-        "none", targs.get("seed", 42), pin_memory=False)
+        "none", targs.get("seed", 42), pin_memory=False, mean=in_mean, std=in_std)
     if args.split == "val":
         if val_loader is None:
             raise SystemExit("no validation split available; use --split train")
@@ -227,7 +228,7 @@ def main():
     else:   # deterministic, un-augmented view of the train split
         from data import SampleListDataset, build_transforms
         loader = torch.utils.data.DataLoader(SampleListDataset(
-            train_loader.dataset.samples, names, build_transforms(img_size)[1]),
+            train_loader.dataset.samples, names, build_transforms(img_size, mean=in_mean, std=in_std)[1]),
             batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     summary = {"split": args.split, "classes": len(classes), "runs": {}}

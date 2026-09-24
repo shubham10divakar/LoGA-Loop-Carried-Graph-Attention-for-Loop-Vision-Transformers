@@ -31,3 +31,19 @@ python train.py --config config.yaml --dataset plantvillage --variant loopvit   
 python train.py --config config.yaml --dataset plantvillage --variant lcga       --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga_plantvillage
 python train.py --config config.yaml --dataset plantvillage --variant lcga-qk    --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/lcga-qk_plantvillage
 python train.py --config config.yaml --dataset plantvillage --variant realformer --epochs 100 --batch-size 16 --save-every 1 --keep-checkpoints 0 --early-stopping true --monitor val_loss --patience 10 --resume auto --output-dir runs/realformer_plantvillage
+
+# ---- pretrained (approach 2): loop core built from a timm ViT, see pretrained.py ----
+# same starting weights for every variant; gamma starts at 0 so all begin as the same model.
+# --new-param-lr-mult 20 lets head + gamma learn at 20x the (small) backbone lr.
+# FGVC protocol uses 448px: add --image-size 448 (logprob memory grows ~16x; use --batch-size 8 or --carry-detach true)
+python train.py --config config.yaml --dataset cub200 --variant loopvit    --pretrained deit_small_patch16_224.fb_in1k --lr 5e-5 --new-param-lr-mult 20 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/loopvit_cub200_deit
+python train.py --config config.yaml --dataset cub200 --variant lcga       --pretrained deit_small_patch16_224.fb_in1k --lr 5e-5 --new-param-lr-mult 20 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/lcga_cub200_deit
+python train.py --config config.yaml --dataset cub200 --variant lcga-qk    --pretrained deit_small_patch16_224.fb_in1k --lr 5e-5 --new-param-lr-mult 20 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/lcga-qk_cub200_deit
+python train.py --config config.yaml --dataset cub200 --variant realformer --pretrained deit_small_patch16_224.fb_in1k --lr 5e-5 --new-param-lr-mult 20 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/realformer_cub200_deit
+# reference: the plain (non-looped) pretrained ViT, fine-tuned the same way
+python train.py --config config.yaml --dataset cub200 --variant loopvit    --pretrained deit_small_patch16_224.fb_in1k --core-depth 12 --loop-steps 1 --lr 5e-5 --new-param-lr-mult 20 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/vit_cub200_deit
+# swap cub200 -> aircraft / plantodc; stronger backbone: --pretrained vit_small_patch14_dinov2.lvd142m
+# core-block choice ablation: --pretrained-blocks stepwise | lower | average | 0,4,8,11
+
+# ---- PlantVillage -> PlantDoc (fine-tune one of your own checkpoints; same variant on both) ----
+python train.py --config config.yaml --dataset plantodc --variant lcga --init-from runs/lcga_plantvillage/best.pt --lr 1e-4 --new-param-lr-mult 10 --warmup-epochs 2 --epochs 50 --batch-size 16 --augment trivial --monitor val_acc --patience 15 --resume auto --output-dir runs/lcga_plantodc_ft

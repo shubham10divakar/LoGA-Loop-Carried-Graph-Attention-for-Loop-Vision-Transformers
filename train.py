@@ -18,6 +18,14 @@ Train LoopViT / LCGA (Loop-Carried Graph Attention) on an image-classification d
     # just build the model and print the summary
     python train.py --config config.yaml --summary-only --num-classes 10
 
+    # fine-tune from a pretrained timm ViT (loop core built from its blocks, see pretrained.py)
+    python train.py --config config.yaml --dataset cub200 --variant lcga \
+        --pretrained deit_small_patch16_224.fb_in1k --lr 5e-5 --new-param-lr-mult 20
+
+    # fine-tune from one of this repo's checkpoints (e.g. PlantVillage -> PlantDoc)
+    python train.py --config config.yaml --dataset plantodc --variant lcga \
+        --init-from runs/lcga_plantvillage/best.pt --lr 1e-4 --new-param-lr-mult 10
+
 Command-line flags override the YAML, and the YAML overrides the defaults below.
 
 Checkpoints (all in --output-dir, default runs/<variant>_<dataset>):
@@ -116,6 +124,8 @@ def get_args(argv=None):
     m.add_argument("--step-embedding", type=str2bool, default=True)
     m.add_argument("--num-cls-tokens", type=int, default=1)
     m.add_argument("--pool", choices=["cls", "mean"], default="cls")
+    m.add_argument("--norm", choices=["rms", "layer"], default="rms")
+    m.add_argument("--layer-scale", type=float, default=0.0, help="LayerScale init (0 = off)")
     m.add_argument("--exit-tau", type=float, default=0.05, help="dynamic-exit entropy threshold (nats)")
     m.add_argument("--min-loop-steps", type=int, default=1)
     m.add_argument("--max-loop-steps", type=int, default=0, help="inference budget; 0 = loop_steps")
@@ -134,6 +144,18 @@ def get_args(argv=None):
     g.add_argument("--carry-source", choices=["same", "shifted"], default="same")
     g.add_argument("--exit-mode", choices=["entropy", "graph", "both", "either"], default="entropy")
     g.add_argument("--exit-graph-eps", type=float, default=0.01)
+
+    w = p.add_argument_group("pretrained initialisation (pretrained.py)")
+    w.add_argument("--pretrained", type=str_or_none, default=None,
+                   help="timm ViT name, e.g. deit_small_patch16_224.fb_in1k; overrides dim/heads/"
+                        "patch/mlp_ratio/ffn/rope/norm/layer_scale to match it")
+    w.add_argument("--pretrained-blocks", type=str, default="stepwise",
+                   help="stepwise | lower | average | comma list of layer indices")
+    w.add_argument("--init-from", type=str_or_none, default=None,
+                   help="repo checkpoint to copy matching weights from (head re-initialised)")
+    w.add_argument("--new-param-lr-mult", type=float, default=1.0,
+                   help="lr multiplier for head, gamma and step embeddings (use ~10-20 when "
+                        "fine-tuning with a small --lr, or gamma barely moves from 0)")
 
     t = p.add_argument_group("training")
     t.add_argument("--epochs", type=int, default=100)
@@ -224,14 +246,24 @@ def cosine_lr(step, total, warmup, base, min_lr):
     return min_lr + 0.5 * (base - min_lr) * (1 + math.cos(math.pi * t))
 
 
-def param_groups(model, wd):
-    decay, no_decay = [], []
+def is_new_param(name: str) -> bool:
+    """Parameters that are not pretrained: the head, LCGA gamma and step embeddings."""
+    return name.startswith("head.") or name.endswith(".attn.gamma") or name == "step_embed"
+
+
+def param_groups(model, wd, new_lr_mult: float = 1.0):
+    """AdamW groups; each carries `lr_mult`, applied on top of the scheduled lr.
+    With new_lr_mult == 1 these are the original two groups, so old optimizer states load."""
+    groups = {}
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
         flat = p.ndim <= 1 or n.endswith((".bias", "pos_embed", "cls_token", "step_embed", ".gamma"))
-        (no_decay if flat else decay).append(p)
-    return [{"params": decay, "weight_decay": wd}, {"params": no_decay, "weight_decay": 0.0}]
+        mult = new_lr_mult if (new_lr_mult != 1.0 and is_new_param(n)) else 1.0
+        groups.setdefault((not flat, mult), []).append(p)
+    # order: decay groups first, as before
+    return [{"params": ps, "weight_decay": wd if decay else 0.0, "lr_mult": mult}
+            for (decay, mult), ps in sorted(groups.items(), key=lambda kv: (not kv[0][0], kv[0][1]))]
 
 
 # Inference-only knobs: changing them must not block --resume.
@@ -252,6 +284,10 @@ def default_output_dir(args) -> str:
     else:
         tag = "run"
     tag = tag.replace("/", "_").replace("\\", "_").replace(" ", "_")
+    if args.pretrained:
+        tag += "_" + args.pretrained.split(".")[0]
+    elif args.init_from:
+        tag += "_ft"
     return os.path.join("runs", f"{CARRY_TO_NAME[args.attn_carry]}_{tag}")
 
 
@@ -377,6 +413,27 @@ def main():
     print(f"[env] device: {device}"
           + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
 
+    # ---- pretrained architecture (must be known before the transforms) ------
+    vit, in_mean, in_std, qkv_bias = None, (0.485, 0.456, 0.406), (0.229, 0.224, 0.225), True
+    if args.pretrained:
+        from pretrained import create_timm_vit, timm_arch
+        print(f"[pretrained] loading timm model {args.pretrained}")
+        vit = create_timm_vit(args.pretrained)
+        arch = timm_arch(vit)
+        in_mean, in_std = arch.pop("input_mean"), arch.pop("input_std")
+        qkv_bias, depth = arch.pop("qkv_bias"), arch.pop("_depth")
+        changed = {k: (getattr(args, k), v) for k, v in arch.items() if getattr(args, k) != v}
+        for k, v in arch.items():
+            setattr(args, k, v)
+        print(f"[pretrained] {depth} pretrained blocks -> core of {args.core_depth} x "
+              f"{args.loop_steps} steps; input mean {in_mean} std {in_std}")
+        if changed:
+            print("[pretrained] args set to match the ViT (was -> now): "
+                  + ", ".join(f"{k} {a} -> {b}" for k, (a, b) in changed.items()))
+        if args.image_size % args.patch_size:
+            raise SystemExit(f"--image-size {args.image_size} must be divisible by the "
+                             f"ViT patch size {args.patch_size}")
+
     # ---- data ---------------------------------------------------------------
     if args.summary_only and not (args.dataset or args.train_dir):
         class_names = [f"class_{i}" for i in range(args.num_classes or 10)]
@@ -390,7 +447,7 @@ def main():
             train_dir, val_dir, args.image_size, args.batch_size,
             args.num_workers, args.num_classes, args.class_selection, args.classes,
             args.max_per_class, args.val_split, args.augment, args.seed,
-            pin_memory=device.type == "cuda")
+            pin_memory=device.type == "cuda", mean=in_mean, std=in_std)
 
     # ---- model --------------------------------------------------------------
     mcfg = LoopViTConfig(
@@ -399,7 +456,8 @@ def main():
         num_heads=args.num_heads, mlp_ratio=args.mlp_ratio, dropout=args.dropout,
         attn_dropout=args.attn_dropout, drop_path=args.drop_path, ffn=args.ffn,
         rope=args.rope, step_embedding=args.step_embedding,
-        num_cls_tokens=args.num_cls_tokens, pool=args.pool,
+        num_cls_tokens=args.num_cls_tokens, pool=args.pool, qkv_bias=qkv_bias,
+        norm=args.norm, layer_scale=args.layer_scale, input_mean=in_mean, input_std=in_std,
         exit_tau=args.exit_tau, min_loop_steps=args.min_loop_steps,
         max_loop_steps=args.max_loop_steps,
         attn_carry=args.attn_carry, carry_gamma_init=args.carry_gamma_init,
@@ -408,6 +466,19 @@ def main():
         carry_clamp=args.carry_clamp, carry_source=args.carry_source,
         exit_mode=args.exit_mode, exit_graph_eps=args.exit_graph_eps)
     model = LoopViT(mcfg)
+    if vit is not None:
+        from pretrained import load_timm_vit
+        src = load_timm_vit(model, vit, args.pretrained_blocks)
+        print(f"[pretrained] core blocks <- pretrained layers "
+              f"{[s[0] if len(s) == 1 else s for s in src]} ({args.pretrained_blocks})")
+        del vit
+    if args.init_from:
+        from pretrained import load_matching
+        loaded, skipped = load_matching(model, args.init_from)
+        print(f"[init-from] {args.init_from}: copied {len(loaded)} tensors, "
+              f"kept fresh init for {len(skipped)}: {skipped}")
+        if not loaded:
+            raise SystemExit("--init-from: no tensor matched; is the model config the same?")
     print_model_summary(model)
     model.to(device)
     if args.summary_only:
@@ -420,7 +491,8 @@ def main():
     # ---- optimisation -------------------------------------------------------
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     eval_criterion = nn.CrossEntropyLoss()
-    opt = torch.optim.AdamW(param_groups(model, args.weight_decay), lr=args.lr, betas=(0.9, 0.999))
+    opt = torch.optim.AdamW(param_groups(model, args.weight_decay, args.new_param_lr_mult),
+                            lr=args.lr, betas=(0.9, 0.999))
     use_amp = args.amp and device.type == "cuda"
     amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp and amp_dtype == torch.float16)
@@ -445,9 +517,11 @@ def main():
         ckpt = torch.load(resume, map_location=device, weights_only=False)
         if ckpt.get("classes") != class_names:
             raise SystemExit("--resume checkpoint classes do not match the current dataset/config")
-        if structural_cfg(ckpt.get("model_cfg", {})) != structural_cfg(mcfg.to_dict()):
-            diff = {k: (ckpt["model_cfg"].get(k), v) for k, v in structural_cfg(mcfg.to_dict()).items()
-                    if ckpt.get("model_cfg", {}).get(k) != v}
+        # checkpoints written before a config field existed used its default
+        ck_cfg = {**LoopViTConfig().to_dict(), **ckpt.get("model_cfg", {})}
+        if structural_cfg(ck_cfg) != structural_cfg(mcfg.to_dict()):
+            diff = {k: (ck_cfg.get(k), v) for k, v in structural_cfg(mcfg.to_dict()).items()
+                    if ck_cfg.get(k) != v}
             raise SystemExit(f"--resume checkpoint model config does not match the current model "
                              f"args (checkpoint, now): {diff}\nUse a different --output-dir or "
                              f"--resume none for a fresh run.")
@@ -533,7 +607,7 @@ def main():
             for x, y in bar:
                 lr = cosine_lr(step, total_steps, warmup_steps, args.lr, args.min_lr)
                 for g in opt.param_groups:
-                    g["lr"] = lr
+                    g["lr"] = lr * g.get("lr_mult", 1.0)
                 x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
                 with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
                     if args.deep_supervision > 0:

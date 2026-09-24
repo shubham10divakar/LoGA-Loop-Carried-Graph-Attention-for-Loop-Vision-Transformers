@@ -31,6 +31,15 @@ rope: true                     # 2D rotary embeddings
 step_embedding: true           # e_t in z_{t+1} = M(z_t + e_t)
 num_cls_tokens: 1              # the paper's task tokens; they bypass the DW-Conv
 pool: cls                      # cls | mean
+norm: rms                      # rms (paper) | layer; --pretrained sets layer
+layer_scale: 0.0               # LayerScale init, 0 = off; --pretrained sets it for DINOv2
+
+# ---------------- pretrained initialisation (pretrained.py) ----------------
+pretrained: null               # timm ViT, e.g. deit_small_patch16_224.fb_in1k | vit_small_patch14_dinov2.lvd142m
+                               # (sets dim/heads/patch/mlp_ratio/ffn=vanilla/rope=false/norm=layer to match)
+pretrained_blocks: stepwise    # stepwise | lower | average | "0,3,6,9": which pretrained layers form the core
+init_from: null                # repo checkpoint to fine-tune from (e.g. PlantVillage -> PlantDoc)
+new_param_lr_mult: 1.0         # lr multiplier for head/gamma/step embeddings; ~10-20 when fine-tuning
 
 # ---------------- LCGA: loop-carried graph attention ----------------
 variant: null                  # preset: loopvit | lcga | lcga-logprob | lcga-qk | realformer
