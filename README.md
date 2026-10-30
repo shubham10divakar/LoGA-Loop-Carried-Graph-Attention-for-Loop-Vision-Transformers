@@ -2,6 +2,64 @@
 
 > *Crystallizing Attention Graphs: Loop-Carried Graph Attention in Looped Vision Transformers*
 
+## 📄 Published paper
+
+This repository is the official code for:
+
+> **LoGA: Loop-Carried Graph Attention Based Looped Vision Transformers for Fine-Grained Plant Disease Classification**
+> Subham Divakar, Rojalina Priyadarshini
+> *ICCK Transactions on Emerging Topics in Artificial Intelligence* (a Scopus-indexed journal), Volume 3, Issue 4, pp. 218–238, 2026.
+> Received 23 Sep 2026 · Revised 23 Oct 2026 · Accepted 26 Oct 2026 · Published 29 Oct 2026 · Open Access (CC BY 4.0)
+
+| | |
+|---|---|
+| DOI | [10.62762/TETAI.2026.672726](https://doi.org/10.62762/TETAI.2026.672726) |
+| Article page | https://www.icck.org/article/abs/tetai.2026.672726 |
+| ARK | [ark:/57805/tetai.2026.672726](https://n2t.net/ark:/57805/tetai.2026.672726) |
+| Journal | ICCK Transactions on Emerging Topics in Artificial Intelligence, ISSN 3068-6652 (Online) |
+| Publisher | Institute of Central Computation and Knowledge (ICCK), https://www.icck.org |
+| Code | https://github.com/shubham10divakar/LoGA-Loop-Carried-Graph-Attention-for-Loop-Vision-Transformers |
+| License (article) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) |
+
+**Headline results (trained from scratch, held-out top-1):**
+
+| Dataset | Vanilla LoopViT | LoGA-logprob |
+|---|---|---|
+| PlantVillage | 98.11% | **99.78%** |
+| PlantDoc | 88.3% | **94.2%** |
+| Cassava | 84.4% | **98.6%** |
+| Plant Pathology 2020 | 91.7% | **99.53%** |
+
+LoGA adds only 24 scalars to a 9.91 M-parameter model and reduces exactly to vanilla
+LoopViT at initialisation.
+
+### How to cite
+
+If you use this code or build on LoGA, please cite the paper.
+
+**APA**
+
+> Divakar, S., & Priyadarshini, R. (2026). LoGA: Loop-Carried Graph Attention Based Looped Vision Transformers for Fine-Grained Plant Disease Classification. *ICCK Transactions on Emerging Topics in Artificial Intelligence, 3*(4), 218–238. https://doi.org/10.62762/TETAI.2026.672726
+
+**BibTeX**
+
+```bibtex
+@article{divakar2026loga,
+  title   = {LoGA: Loop-Carried Graph Attention Based Looped Vision Transformers for Fine-Grained Plant Disease Classification},
+  author  = {Divakar, Subham and Priyadarshini, Rojalina},
+  journal = {ICCK Transactions on Emerging Topics in Artificial Intelligence},
+  volume  = {3},
+  number  = {4},
+  pages   = {218--238},
+  year    = {2026},
+  publisher = {Institute of Central Computation and Knowledge},
+  doi     = {10.62762/TETAI.2026.672726},
+  url     = {https://doi.org/10.62762/TETAI.2026.672726}
+}
+```
+
+---
+
 This repo implements **LCGA (Loop-Carried Graph Attention)** on top of **LoopViT**
 (Shu et al., [arXiv:2602.02156](https://arxiv.org/abs/2602.02156)), ported to image
 classification. The full design is in
@@ -351,3 +409,4 @@ The base architecture is LoopViT:
 ```
 
 LCGA, the graph-stability exit and this classification code are by Shubham Divakar.
+To cite LoGA itself, see [How to cite](#how-to-cite) at the top of this README.
