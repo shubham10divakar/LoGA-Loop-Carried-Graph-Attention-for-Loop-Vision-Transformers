@@ -2,7 +2,9 @@
 
 > *Crystallizing Attention Graphs: Loop-Carried Graph Attention in Looped Vision Transformers*
 
-## 📄 Published paper
+## 📄 Published paper in a Scopus-indexed journal
+
+> ✅ **This work is published in a Scopus-indexed journal:** *ICCK Transactions on Emerging Topics in Artificial Intelligence* · DOI: [10.62762/TETAI.2026.672726](https://doi.org/10.62762/TETAI.2026.672726)
 
 This repository is the official code for:
 
